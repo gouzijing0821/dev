@@ -1,0 +1,193 @@
+#import
+#forward.fastq.gz + reverse.fastq.gz ————>  multiplexed-seqs.qza
+qiime tools import \
+ --type MultiplexedPairedEndBarcodeInSequence \
+ --input-path . \
+ --output-path multiplexed-seqs.qza
+
+
+#Demultiplexing and Trimming Adapters
+#multiplexed-seqs.qza + metadata.tsv ————>  demultiplexed-seqs.qza + untrimmed.qza
+  #Demultiplexing
+  qiime cutadapt demux-paired \
+    --i-seqs multiplexed-seqs.qza \
+    --m-forward-barcodes-file metadata.tsv \
+    --m-forward-barcodes-column forward-barcode \
+    #--m-reverse-barcodes-file metadata.tsv \  是否需要？
+    #--m-reverse-barcodes-column reverse-barcode \  是否需要？
+    #--p-error-rate 0.1 \  是否需要？参数如何设置？
+    --o-per-sample-sequences demultiplexed-seqs.qza \
+    --o-untrimmed-sequences untrimmed.qza \
+    --verbose
+    结果：
+      Done           07:30:57     9,980,605 reads @ 2711.0 µs/read;   0.02 M reads/minuteee
+      Finished in 27057.63 s (2711 µs/read; 0.02 M reads/minute).
+      === Summary ===
+      Total read pairs processed:          9,980,605
+      Read 1 with adapter:                 510,102 (5.1%)
+      Read 2 with adapter:                 510,102 (5.1%)
+      == Read fate breakdown ==
+        Pairs that were too short:                  11 (0.0%)
+        Pairs written (passing filters):     9,980,594 (100.0%)
+        Total basepairs processed: 4,990,302,500 bp
+        Read 1: 2,495,151,250 bp
+        Read 2: 2,495,151,250 bp
+        Total written (filtered):  4,978,263,726 bp (99.8%)
+        Read 1: 2,489,153,986 bp
+        Read 2: 2,489,109,740 bp
+  #Trim adapters、引物（adapters在第一行，未进行adapter切除）
+  qiime cutadapt trim-paired \
+    --i-demultiplexed-sequences demux.qza \#应该为(demultiplexed-seqs.qza)？
+    --p-front-f f引物 \
+    --p-front-r r引物 \
+    --o-trimmed-sequences trimmed-seqs.qza
+  #demux 数据质检，好文库应该是每个样本数量差不多
+  qiime demux summarize \
+    --i-data demultiplexed-seqs.qza \
+    --o-visualization demultiplexed-seqs.qzv
+
+
+#denoising with DADA2（质量过滤、去噪、去嵌合体）
+#demultiplexed-seqs.qza  ————>  table.qza + rep-seqs.qza + denoising-stats.qza
+qiime dada2 denoise-paired \
+  --i-demultiplexed-seqs demultiplexed-seqs.qza \
+  --p-trim-left-f 13 \
+  --p-trim-left-r 13 \
+  --p-trunc-len-f 200 \
+  --p-trunc-len-r 200 \
+  --o-table table.qza \
+  --o-representative-sequences rep-seqs.qza \
+  --o-denoising-stats denoising-stats.qza \
+  --p-n-threads 3 \
+  --verbose
+  #生成统计结果 显示的是过滤与去噪之后得到的可用于后续分析的序列的情况摘要
+  qiime metadata tabulate \
+    --m-input-file denoising-stats.qza \
+    --o-visualization denoising-stats.qzv
+  #生成特征表摘要 结合了元数据显示在不同分组标准之下各组样本的序列的情况。
+  #通过调整Interactive Sample Detail当中的Sampling depth，可以看到在不同测序深度的情况下各个样本是否还有保留。
+  #这一深度的选择对于之后的稀疏曲线的绘制比较关键。 
+  qiime feature-table summarize \
+    --i-table table.qza \
+    --o-visualization table.qzv \
+    --m-sample-metadata-file sample-metadata.tsv
+  #生成代表序列摘要 显示代表性序列，上方的两个表格分别为序列长度描述统计表以及频数统计结果。可将这些代表性序列导入序列比对软件进行物种注释。
+  qiime feature-table tabulate-seqs \
+    --i-data rep-seqs.qza \
+    --o-visualization rep-seqs.qzv
+
+
+#构建进化树（​ITS序列具有高可变性，难以对齐，不能进行常规的建树分析）
+qiime phylogeny align-to-tree-mafft-fasttree \
+  --i-sequences rep-seqs.qza \  #输入特征序列文件
+  --o-alignment aligned-rep-seqs.qza \  #对ASV特征序列中的每条ASV序列进行多序列比对并对齐，输出对齐的序列文件
+  --o-masked-alignment masked-aligned-rep-seqs.qza \  #对对齐的高度可变区(高变区,或者无意义的噪声区域)进行mask或过滤，输出mask后的对齐的序列文件
+  --o-tree unrooted-tree.qza \  #输出无根数文件
+  --o-rooted-tree rooted-tree.qza  #输出有根树文件。使用 “根中点法” 将树的根放置在无根树中最长端到端距离的中点，从而形成有根树。
+  
+
+#Taxonomy classification-基于sklearn + Naive Bayes classifiers 
+#rep-seqs.qza + classifier ————>  taxonomy.qza
+  #分类器注释
+  conda install --override-channels -c defaults scikit-learn
+  qiime feature-classifier classify-sklearn \
+   --i-classifier  ./gg-13-8-99-515-806-nb-classifier.qza \
+   --i-reads rep-seqs.qza \
+   --o-classification taxonomy.qza
+   --p-n-jobs -2
+  #物种组成柱状图（Taxonomy barchart）
+    #样本过滤:筛选掉比稀疏阈值更少特征的样本
+    qiime feature-table filter-samples \
+    --i-table ./dada2_table.qza \
+    --p-min-frequency 2000 \
+    --o-filtered-table ./table_2k.qza
+    #生成可视化柱状图
+    qiime taxa barplot \
+    --i-table ./table_2k.qza \
+    --i-taxonomy ./taxonomy.qza \
+    --m-metadata-file ./metadata.tsv \
+    --o-visualization ./taxa_barplot.qzv
+    #结果可视化
+    qiime tools view ./taxa_barplot.qzv
+
+#Taxonomy classification-基于blast
+qiime feature-classifier classify-consensus-blast \
+ --i-query 4-rep-seqs.qza
+ --i-reference-reads  
+ --i-reference-taxonomy
+ --o-classification taxonomy.qza
+
+
+#稀疏曲线：探索alpha多样性与采用深度之间的关系
+qiime diversity alpha-rarefaction \
+  --i-table table.qza \ #输入特征丰度表文件
+  --i-phylogeny rooted-tree.qza \ # 有根树文件(用于计算Faith's PD)
+  --p-min-depth 0 \
+  --p-max-depth 4000 \ #最大的采样深度 (抽平深度)
+  --m-metadata-file sample_metadata.tsv \
+  --o-visualization alpha-rarefaction.qzv
+
+
+#多样性分析
+qiime diversity core-metrics-phylogenetic \
+  --i-phylogeny rooted-tree.qza \ #输入有根树文件
+  --i-table table.qza \ #输入ASV特征丰度表
+  --p-sampling-depth 1103 \ #指定抽平(即稀疏 rarefaction)深度;注意，如果任何样本的总丰度小于该值，这些样本将从该分析中删除。
+  #选择时可以参考table.qzv呈现的信息。对于当前的二代测序产品，由于通量极高,一般可以选择最小丰度值的90%-95%
+  --m-metadata-file sample_metadata.tsv \ #输入数据信息表，可以是之前使用的元数据表，也可以另建
+  --output-dir core-metrics-results
+#alpha多样性分组比较（分组是时间序列或连续变量，使用qiime diversity alpha-correlation探究alpha多样性指数与时间关联性。）
+  #观察Faith系统发育多样性
+  qiime diversity alpha-group-significance \
+   --i-alpha-diversity ./core-metrics-results/faith_pd_vector.qza \
+   --m-metadata-file ./metadata.tsv \
+   --o-visualization ./core-metrics-results/faith-pd-group-significance.qzv
+  #观察Pielou均匀度（Pielou's evenness）
+  qiime diversity alpha-group-significance \
+   --i-alpha-diversity ./core-metrics-results/evenness_vector.qza \
+   --m-metadata-file ./metadata.tsv \
+   --o-visualization ./core-metrics-results/evenness-group-significance.qzv 
+#Beta多样性指数的组间差异分析：比较组内样本差异和组间样本差异，permanova分析统计趋势
+#分组是时间序列或连续变量，使用qiime metadata distance-matrix命令配合qiime diversity mantel和qiime diversity bioenv`进行分析。
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file sample_metadata.tsv \
+  --m-metadata-column body-site \ #要进行比较的组，即在样本信息表中的列名
+  --o-visualization core-metrics-results/unweighted-unifrac-body-site-significance.qzv \
+  --p-pairwise #进行组间的两两成对检验，不加这个参数则不会进行
+#查看可视化结果，结果解读：http://lib.mimazi.net/bioinf/2062.html
+#自定义emperor的第三轴：在绘制三维PCoA图时，将自定义的连续型变量作为第三轴加入绘图。
+qiime emperor plot \
+  --i-pcoa core-metrics-results/unweighted_unifrac_pcoa_results.qza \
+  --m-metadata-file sample_metadata.tsv \
+  --p-custom-axes days-since-experiment-start \
+  --o-visualization core-metrics-results/unweighted-unifrac-emperor-days-since-experiment-start.qzv
+
+
+
+
+#ANCOM物种差异分析（如果多数物种都发生了明显变化，可能需要使用qiime gneiss找出真正变化的物种）
+#过滤低丰度ASV(筛选最小频率为50，至少在4个样品出现的特征)
+qiime feature-table filter-features \
+ --i-table ./table_2k.qza \
+ --p-min-frequency 50 \
+ --p-min-samples 4 \
+ --m-metadata-file sample_metadata.tsv \
+ --p-where "[body-site]='gut'" \
+ --o-filtered-table table_2k_abund.qza
+#特征丰度表添加伪计数，删除零值
+qiime composition add-pseudocount \
+ --i-table table_2k_abund.qza \
+ --o-composition-table table2k_abund_comp.qza
+#组间差异比较（ancom分析）
+qiime composition ancom \
+ --i-table table2k_abund_comp.qza \
+ --m-metadata-file sample_metadata.tsv \
+ --m-metadata-column donor \
+ --o-visualization ancom_donor.qzv
+#可选取属水平的特征表，按照界、门、纲、目、科、属、种的顺序，属水平为第6级分类 
+qiime taxa collapse \
+ --i-table ./table_2k.qza \
+ --i-taxonomy ./taxonomy.qza \
+ --p-level 6 \
+ --o-collapsed-table table-l6.qza

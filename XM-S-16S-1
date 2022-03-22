@@ -1,0 +1,101 @@
+#查看fastq文件
+zcat SRR1039510_1.fastq.gz|head -n 10 (Mac下别用，会加.Z导致访问不到文件)，应该使用：
+gunzip -c /XM-S-V4-1_FKDL220009806-1a_1.clean.fq.gz |head -n 12
+#激活qiime
+conda activate qiime2-2022.2
+
+#bash的配置文件是 -/.bash_profile
+#zsh的配置文件是-/.zshrc
+
+#import 先进入fq文件所在目录｜文件名为forward.fastq.gz、reverse.fastq.gz｜output为文件名，不是路径
+#forward.fastq.gz + reverse.fastq.gz ————>  multiplexed-seqs.qza
+qiime tools import \
+ --type MultiplexedPairedEndBarcodeInSequence\
+ --input-path . \
+ --output-path multiplexed-seqs.qza
+#Demultiplexing and Trimming Adapters from Reads with q2-cutadapt
+#multiplexed-seqs.qza + metadata.tsv ————>  demultiplexed-seqs.qza + untrimmed.qza
+qiime cutadapt demux-paired \
+ --i-seqs multiplexed-seqs.qza \
+ --m-forward-barcodes-file XM-S-16S-1-metadata.tsv \
+ --m-forward-barcodes-column forward-barcode \
+ --m-reverse-barcodes-file XM-S-16S-1-metadata.tsv \
+ --m-reverse-barcodes-column reverse-barcode \
+ --p-error-rate 0.1 \
+ --o-per-sample-sequences demultiplexed-seqs.qza \
+ --o-untrimmed-sequences untrimmed.qza \
+ --verbose
+结果：7h
+  === Summary ===
+  Total read pairs processed:         10,145,740
+  Read 1 with adapter:                 339,839 (3.3%)
+  Read 2 with adapter:                 339,839 (3.3%)
+  == Read fate breakdown ==
+  Pairs that were too short:                  21 (0.0%)
+  Pairs written (passing filters):    10,145,719 (100.0%)
+
+  Total basepairs processed: 5,072,870,000 bp
+  Read 1: 2,536,435,000 bp
+  Read 2: 2,536,435,000 bp
+  Total written (filtered):  5,060,647,716 bp (99.8%)
+  Read 1: 2,533,483,504 bp
+  Read 2: 2,527,164,212 bp
+  Saved SampleData[PairedEndSequencesWithQuality] to: demultiplexed-seqs.qza
+  Saved MultiplexedPairedEndBarcodeInSequence to: untrimmed.qza
+
+
+
+#Trim adapters from demultiplexed reads
+qiime cutadapt trim-single \
+  --i-demultiplexed-sequences demultiplexed-seqs.qza \
+  --p-front GCTACGGGGGG \
+  --p-error-rate 0 \
+  --o-trimmed-sequences trimmed-seqs.qza \
+  --verbose
+#Summarize demultiplexed and trimmed reads
+#demux数据质检，好文库应该是每个样本数量差不多 ｜ qza ————> qzv
+qiime demux summarize \
+  --i-data demultiplexed-seqs.qza \
+  --o-visualization demultiplexed-seqs.qzv
+#查看qzv文件
+qiime tools view demultiplexed-seqs.qzv
+#denoising with DADA2
+#demultiplexed-seqs.qza  ————>  table.qza + rep-seqs.qza + denoising-stats.qza
+qiime dada2 denoise-paired \
+  --i-demultiplexed-seqs 3-demultiplexed-seqs.qza \
+  --p-trim-left-f 13 \
+  --p-trim-left-r 13 \
+  --p-trunc-len-f 138 \
+  --p-trunc-len-r 138 \
+  --o-table table.qza \
+  --o-representative-sequences rep-seqs.qza \
+  --o-denoising-stats denoising-stats.qza
+#summarize
+qiime feature-table summarize \
+  --i-table 4-table.qza \
+  --o-visualization 5-table.qzv \
+  --m-sample-metadata-file 1-XM-S-16S-1-metadata.tsv
+qiime feature-table tabulate-seqs \
+  --i-data 4-rep-seqs.qza \
+  --o-visualization 5-rep-seqs.qzv
+qiime metadata tabulate \
+  --m-input-file 4-denoising-stats.qza \
+  --o-visualization 5-denoising-stats.qzv
+#Taxonomy classification-基于sklearn
+conda install --override-channels -c defaults scikit-learn #更新sklearn分类器包
+qiime feature-classifier classify-sklearn \
+ --i-classifier  /Users/echo/database/gg-13-8-99-515-806-nb-classifier.qza \
+ --i-reads 4-rep-seqs.qza \
+ --o-classification taxonomy.qza #输出物种注释信息，物种注释时间较长，建议nohup
+#绘制样本物种组成柱状图
+qiime taxa barplot \ 
+ --i-table 4-table.qza \
+ --i-taxonomy 6-taxonomy.qza \
+ --m-metadata-file 1-XM-S-16S-1-metadata.tsv  \
+ --o-visualization taxa-bar-plots.qzv
+#Taxonomy classification-基于blast
+qiime feature-classifier classify-consensus-blast \
+ --i-query 4-rep-seqs.qza
+ --i-reference-reads  
+ --i-reference-taxonomy
+ --o-classification taxonomy.qza

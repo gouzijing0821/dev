@@ -1,0 +1,6 @@
+#import
+qiime tools import 
+--type "SampleData[PairedEndSequencesWithQuality]" \
+--input-format PairedEndFastqManifestPhred33V2 \
+--input-path XM-S-V4-1-8-manifest.tsv \
+--output-path multiplexed-seqs.qza

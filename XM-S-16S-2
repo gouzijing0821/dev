@@ -1,0 +1,215 @@
+#查看fastq文件
+zcat SRR1039510_1.fastq.gz|head -n 10 (Mac下别用，会加.Z导致访问不到文件)，应该使用：
+gunzip -c /XM-S-V4-1_FKDL220009806-1a_1.clean.fq.gz |head -n 12
+#激活qiime
+conda activate qiime2-2022.2
+
+#bash的配置文件是 -/.bash_profile
+#zsh的配置文件是-/.zshrc
+
+#import 先进入fq文件所在目录｜文件名为forward.fastq.gz、reverse.fastq.gz｜output为文件名，不是路径
+#forward.fastq.gz + reverse.fastq.gz ————>  multiplexed-seqs.qza
+qiime tools import \
+ --type MultiplexedPairedEndBarcodeInSequence\
+ --input-path /Users/echo/sequencedata/XM-S-16S/XM1-8/X101SC21042625-Z01-J010/1.rawdata/XM-S-V4-2_FKDL220009807-1a \
+ --output-path XM-V4-2-multiplexed-seqs.qza
+
+
+#Demultiplexing and Trimming Adapters from Reads with q2-cutadapt
+#multiplexed-seqs.qza + metadata.tsv ————>  demultiplexed-seqs.qza + untrimmed.qza
+qiime cutadapt demux-paired \
+ --i-seqs XM-V4-2-multiplexed-seqs.qza \
+ --m-forward-barcodes-file XM-S-V4-2-metadata.tsv \
+ --m-forward-barcodes-column forward-barcode \ #这次把forward和reverse的barcode改成一样的了
+ --m-reverse-barcodes-file XM-S-V4-2-metadata.tsv \
+ --m-reverse-barcodes-column reverse-barcode \
+ --p-error-rate 0.1 \
+ --o-per-sample-sequences XM-V4-2-demultiplexed-seqs.qza \
+ --o-untrimmed-sequences XM-V4-2-untrimmed.qza \
+ --verbose
+结果：
+ Done           07:30:57     9,980,605 reads @ 2711.0 µs/read;   0.02 M reads/minuteee
+ Finished in 27057.63 s (2711 µs/read; 0.02 M reads/minute).
+ === Summary ===
+ Total read pairs processed:          9,980,605
+  Read 1 with adapter:                 510,102 (5.1%)
+  Read 2 with adapter:                 510,102 (5.1%)
+ == Read fate breakdown ==
+ Pairs that were too short:                  11 (0.0%)
+ Pairs written (passing filters):     9,980,594 (100.0%)
+ Total basepairs processed: 4,990,302,500 bp
+ Read 1: 2,495,151,250 bp
+ Read 2: 2,495,151,250 bp
+ Total written (filtered):  4,978,263,726 bp (99.8%)
+ Read 1: 2,489,153,986 bp
+ Read 2: 2,489,109,740 bp
+#Trim adapters from demultiplexed reads
+qiime cutadapt trim-single \
+  --i-demultiplexed-sequences demultiplexed-seqs.qza \
+  --p-front GCTACGGGGGG \
+  --p-error-rate 0 \
+  --o-trimmed-sequences trimmed-seqs.qza \
+  --verbose
+#Summarize demultiplexed and trimmed reads
+#demux数据质检，好文库应该是每个样本数量差不多 ｜ qza ————> qzv
+qiime demux summarize \
+  --i-data demultiplexed-seqs.qza \
+  --o-visualization demultiplexed-seqs.qzv
+#查看qzv文件
+qiime tools view demultiplexed-seqs.qzv
+#denoising with DADA2
+#demultiplexed-seqs.qza  ————>  table.qza + rep-seqs.qza + denoising-stats.qza
+qiime dada2 denoise-paired \
+  --i-demultiplexed-seqs XM-S-V4-2-demultiplexed-seqs.qza \
+  --p-trim-left-f 13 \ #序列左端 (5'端) 切除碱基长度。一般用于切除低质量碱基、引物(建议切除)或barcode(如有)
+  --p-trim-left-r 13 \
+  --p-trunc-len-f 200 \ #序列右端 (3'端) 切除碱基，使得长度为该值。注意，如果本身长度已经低于该值，则该序列将被舍弃，所以不要设置得过高；设置为 0 不进行任何切除和过滤。
+  --p-trunc-len-r 200 \  
+  --o-table XM-S-V4-2-table.qza \
+  --o-representative-sequences XM-S-V4-2-rep-seqs.qza \
+  --o-denoising-stats XM-S-V4-2-denoising-stats.qza \
+  --p-n-threads 3 #用于设置运行时使用的线程数量。线程越多，则运行速度越快。
+#summarize
+#生成特征表摘要：展示了样本数、特征数和分布等信息、每个样本中的特征数目、特征信息（特征名称、出现频率和共出现在多少个样本中）
+qiime feature-table summarize \
+  --i-table XM-S-V4-2-table.qza \
+  --o-visualization XM-S-V4-2-table.qzv \
+  --m-sample-metadata-file XM-S-V4-2-sample-metadata.tsv
+#生成代表序列摘要：代表序列统计信息。有长度摘要、不同百分比下的长度统计和具体代表序列碱基信息
+qiime feature-table tabulate-seqs \
+  --i-data XM-S-V4-2-rep-seqs.qza \
+  --o-visualization XM-S-V4-2-rep-seqs.qzv
+#生成统计结果：每个样本的输入、过滤、去噪和非嵌合体的统计结果。展示了样本的质量控制结果，用于样本异常筛选和特征表抽平标准化
+qiime metadata tabulate \
+  --m-input-file XM-S-V4-2-denoising-stats.qza \
+  --o-visualization XM-S-V4-2-denoising-stats.qzv
+#Taxonomy classification-基于sklearn
+conda install --override-channels -c defaults scikit-learn #更新sklearn分类器包
+qiime feature-classifier classify-sklearn \
+ --i-classifier  /Users/echo/database/gg-13-8-99-515-806-nb-classifier.qza \
+ --i-reads XM-S-V4-2-rep-seqs.qza \
+ --o-classification XM-S-V4-2-taxonomy.qza #输出物种注释信息，物种注释时间较长，建议nohup
+ --p-n-jobs -2
+#绘制样本物种组成柱状图
+qiime taxa barplot \
+ --i-table XM-S-V4-2-table.qza \
+ --i-taxonomy XM-S-V4-2-taxonomy.qza \
+ --m-metadata-file XM-S-V4-2-sample-metadata.tsv \
+ --o-visualization XM-S-V4-2-taxa-bar-plots.qzv
+
+
+#稀疏曲线
+qiime diversity alpha-rarefaction \
+  --i-table XM-S-V4-2-table.qza \
+  --m-metadata-file XM-S-V4-2-sample-metadata.tsv \
+  --o-visualization XM-S-V4-2-alpha_rarefaction_curves.qzv \
+  --p-min-depth 10 \
+  --p-max-depth 2700
+
+
+#重新拆分
+#Demultiplexing and Trimming Adapters from Reads with q2-cutadapt
+#multiplexed-seqs.qza + metadata.tsv ————>  demultiplexed-seqs.qza + untrimmed.qza
+qiime cutadapt demux-paired \
+ --i-seqs XM-V4-2-multiplexed-seqs.qza \
+ --m-forward-barcodes-file XM-S-V4-2-metadata.tsv \
+ --m-forward-barcodes-column forward-barcode \
+ --p-error-rate 0.1 \
+ --o-per-sample-sequences XM-V4-2-demultiplexed-seqs.qza \
+ --o-untrimmed-sequences XM-V4-2-untrimmed.qza \
+ --verbose
+结果：
+ Done           01:01:56     9,980,605 reads @ 372.3 µs/read;   0.16 M reads/minute
+ Finished in 3716.80 s (372 µs/read; 0.16 M reads/minute).
+ === Summary ===
+ Total read pairs processed:          9,980,605
+  Read 1 with adapter:               9,591,043 (96.1%)
+ == Read fate breakdown ==
+ Pairs that were too short:                  54 (0.0%)
+ Pairs written (passing filters):     9,980,551 (100.0%)
+ Total basepairs processed: 4,990,302,500 bp
+  Read 1: 2,495,151,250 bp
+  Read 2: 2,495,151,250 bp
+ Total written (filtered):  4,871,432,291 bp (97.6%)
+  Read 1: 2,376,294,541 bp
+  Read 2: 2,495,137,750 bp
+
+
+#Trim adapters from demultiplexed reads
+#demultiplexed-seqs.qza ————> trimmed-seqs.qza
+qiime cutadapt trim-paired \
+  --i-demultiplexed-sequences XM-S-V4-2-demultiplexed-seqs.qza \
+  --p-cores 3 \
+  --p-front-f GTGYCAGCMGCCGCGGTAA \
+  --p-front-r GGACTACNVGGGTWTCTAAT \
+  --p-error-rate 0.1 \
+  --o-trimmed-sequences XM-S-V4-2-trimmed-seqs.qza \
+  --verbose
+#引物
+#515F 5'
+网上  GTGCCAGCMGCCGCGGTAA
+自己  GTGYCAGCMGCCGCGGTAA
+#806R 5'
+网上  GGACTACHVHHHTWTCTAAT
+自己  GGACTACNVGGGTWTCTAAT
+#demux数据质检，好文库应该是每个样本数量差不多 ｜ qza ————> qzv
+qiime demux summarize \
+  --i-data XM-S-V4-2-trimmed-seqs.qza \
+  --o-visualization XM-S-V4-2-trimmed-seqs.qzv
+qiime demux summarize \
+  --i-data XM-S-V4-2-demultiplexed-seqs.qza \
+  --o-visualization XM-S-V4-2-demultiplexed-seqs.qzv
+#查看qzv文件
+qiime tools view demultiplexed-seqs.qzv
+
+
+#denoising with DADA2
+#trimmed-seqs.qza  ————>  table.qza + rep-seqs.qza + denoising-stats.qza
+qiime dada2 denoise-paired \
+  --i-demultiplexed-seqs XM-S-V4-2-trimmed-seqs.qza \
+  #--p-trim-left-f 13 \ 
+  #--p-trim-left-r 13 \
+  --p-trunc-len-f 180 \
+  --p-trunc-len-r 180 \  
+  --o-table XM-S-V4-2-table.qza \
+  --o-representative-sequences XM-S-V4-2-rep-seqs.qza \
+  --o-denoising-stats XM-S-V4-2-denoising-stats.qza \
+  --p-n-threads 3 #用于设置运行时使用的线程数量。线程越多，则运行速度越快。
+#summarize
+#生成特征表摘要：展示了样本数、特征数和分布等信息、每个样本中的特征数目、特征信息（特征名称、出现频率和共出现在多少个样本中）
+qiime feature-table summarize \
+  --i-table XM-S-V4-2-table.qza \
+  --o-visualization XM-S-V4-2-table.qzv \
+  --m-sample-metadata-file XM-S-V4-2-sample-metadata.tsv
+#生成代表序列摘要：代表序列统计信息。有长度摘要、不同百分比下的长度统计和具体代表序列碱基信息
+qiime feature-table tabulate-seqs \
+  --i-data XM-S-V4-2-rep-seqs.qza \
+  --o-visualization XM-S-V4-2-rep-seqs.qzv
+#生成统计结果：每个样本的输入、过滤、去噪和非嵌合体的统计结果。展示了样本的质量控制结果，用于样本异常筛选和特征表抽平标准化
+qiime metadata tabulate \
+  --m-input-file XM-S-V4-2-denoising-stats.qza \
+  --o-visualization XM-S-V4-2-denoising-stats.qzv
+
+
+#Taxonomy classification-基于sklearn
+conda install --override-channels -c defaults scikit-learn #更新sklearn分类器包
+qiime feature-classifier classify-sklearn \
+ --i-classifier  /Users/echo/database/gg-13-8-99-515-806-nb-classifier.qza \
+ --i-reads XM-S-V4-2-rep-seqs.qza \
+ --o-classification XM-S-V4-2-taxonomy.qza #输出物种注释信息，物种注释时间较长，建议nohup
+ --p-n-jobs -2
+#绘制样本物种组成柱状图
+qiime taxa barplot \
+ --i-table XM-S-V4-2-table.qza \
+ --i-taxonomy XM-S-V4-2-taxonomy.qza \
+ --m-metadata-file XM-S-V4-2-sample-metadata.tsv \
+ --o-visualization XM-S-V4-2-taxa-bar-plots.qzv
+
+
+#稀疏曲线
+qiime diversity alpha-rarefaction \
+  --i-table XM-S-V4-2-table.qza \
+  --m-metadata-file XM-S-V4-2-sample-metadata.tsv \
+  --o-visualization XM-S-V4-2-alpha_rarefaction_curves.qzv \
+  --p-min-depth 10 \
+  --p-max-depth 2700
